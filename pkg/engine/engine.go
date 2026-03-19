@@ -70,11 +70,6 @@ func NewEngine(ctx context.Context, cfg *config.Config) (*Engine, error) {
 		config:        cfg,
 		ravenClient:   engine.client,
 	}
-	err = engine.tunnel.InitDriver()
-	if err != nil {
-		klog.Errorf("fail to init tunnel driver, error %s", err.Error())
-		return engine, err
-	}
 
 	engine.proxy = &ProxyEngine{
 		nodeName:    engine.nodeName,
@@ -144,13 +139,15 @@ func (e *Engine) regularSync() {
 }
 
 func (e *Engine) findLocalGateway() {
-	e.tunnel.localGateway = nil
-	e.proxy.localGateway = nil
 	var gwList v1beta1.GatewayList
 	err := e.client.List(context.TODO(), &gwList)
 	if err != nil {
+		klog.Errorf("failed to list gateways, keeping previous state: %s", err.Error())
 		return
 	}
+	// Reset only after successful list
+	e.tunnel.localGateway = nil
+	e.proxy.localGateway = nil
 	for _, gw := range gwList.Items {
 		for _, node := range gw.Status.Nodes {
 			if node.NodeName == e.nodeName {
@@ -163,7 +160,7 @@ func (e *Engine) findLocalGateway() {
 }
 
 func (e *Engine) Cleanup() {
-	if e.option.GetTunnelStatus() {
+	if e.tunnel.driverInitialized {
 		e.tunnel.CleanupDriver()
 	}
 	if e.option.GetProxyStatus() {
