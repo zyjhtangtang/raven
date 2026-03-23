@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strconv"
 	"time"
 
 	"github.com/EvilSuperstars/go-cidrman"
@@ -46,11 +45,12 @@ type TunnelEngine struct {
 	forwardNodeIP bool
 	natTraversal  bool
 
-	localGateway *v1beta1.Gateway
-	config       *config.Config
-	ravenClient  client.Client
-	routeDriver  routedriver.Driver
-	vpnDriver    vpndriver.Driver
+	localGateway      *v1beta1.Gateway
+	config            *config.Config
+	ravenClient       client.Client
+	routeDriver       routedriver.Driver
+	vpnDriver         vpndriver.Driver
+	driverInitialized bool
 
 	nodeInfos map[types.NodeName]*v1beta1.NodeInfo
 	network   *types.Network
@@ -68,18 +68,24 @@ func (c *TunnelEngine) InitDriver() error {
 	}
 	c.vpnDriver, err = vpndriver.New(c.config.Tunnel.VPNDriver, c.config)
 	if err != nil {
+		if cleanupErr := c.routeDriver.Cleanup(); cleanupErr != nil {
+			klog.Errorf("fail to cleanup route driver after vpn driver creation failure: %s", cleanupErr.Error())
+		}
 		return fmt.Errorf("fail to create vpn driver: %s, %s", c.config.Tunnel.VPNDriver, err)
 	}
 	err = c.vpnDriver.Init()
 	if err != nil {
+		if cleanupErr := c.routeDriver.Cleanup(); cleanupErr != nil {
+			klog.Errorf("fail to cleanup route driver after vpn driver init failure: %s", cleanupErr.Error())
+		}
 		return fmt.Errorf("fail to initialize vpn driver: %s, %s", c.config.Tunnel.VPNDriver, err)
 	}
 	klog.Infof("route driver %s and vpn driver %s are initialized", c.config.Tunnel.RouteDriver, c.config.Tunnel.VPNDriver)
 	return nil
 }
 
-func (c *TunnelEngine) CleanupDriver() {
-	_ = wait.PollUntilContextTimeout(context.Background(), time.Second, 5*time.Second, true, func(ctx context.Context) (done bool, err error) {
+func (c *TunnelEngine) CleanupDriver() bool {
+	err := wait.PollUntilContextTimeout(context.Background(), time.Second, 5*time.Second, true, func(ctx context.Context) (done bool, err error) {
 		err = c.vpnDriver.Cleanup()
 		if err != nil {
 			klog.Errorf("fail to cleanup vpn driver: %s", err.Error())
@@ -92,21 +98,42 @@ func (c *TunnelEngine) CleanupDriver() {
 		}
 		return true, nil
 	})
+	if err != nil {
+		klog.Errorf("driver cleanup did not complete successfully, will retry next sync")
+		return false
+	}
+	return true
 }
 
 func (c *TunnelEngine) Status() bool {
-	aep := getActiveEndpoints(c.localGateway, v1beta1.Tunnel)
-	if aep != nil && aep.Config != nil {
-		enable, err := strconv.ParseBool(aep.Config[utils.RavenEnableTunnel])
-		if err == nil {
-			return enable
-		}
+	if c.localGateway == nil {
+		return false
 	}
-	return false
+	return c.localGateway.Spec.TunnelConfig.Replicas > 0
 }
 
 // sync syncs full state according to the gateway list.
 func (c *TunnelEngine) Handler() error {
+	shouldRun := c.Status()
+
+	if !shouldRun {
+		if c.driverInitialized {
+			klog.Infoln("L3 tunnel disabled, cleaning up drivers")
+			if c.CleanupDriver() {
+				c.driverInitialized = false
+			}
+		}
+		return nil
+	}
+
+	if !c.driverInitialized {
+		klog.Infoln("L3 tunnel enabled, initializing drivers")
+		if err := c.InitDriver(); err != nil {
+			return fmt.Errorf("fail to init tunnel driver on demand: %w", err)
+		}
+		c.driverInitialized = true
+	}
+
 	if c.config.Tunnel.NATTraversal {
 		if err := c.checkNatCapability(); err != nil {
 			klog.Errorf("fail to check the capability of NAT, error %s", err.Error())

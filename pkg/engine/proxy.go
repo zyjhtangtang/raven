@@ -17,7 +17,6 @@ import (
 	"github.com/openyurtio/raven/pkg/proxyengine"
 	"github.com/openyurtio/raven/pkg/proxyengine/proxyclient"
 	"github.com/openyurtio/raven/pkg/proxyengine/proxyserver"
-	"github.com/openyurtio/raven/pkg/utils"
 )
 
 type ActionType string
@@ -57,17 +56,14 @@ type ProxyEngine struct {
 }
 
 func (p *ProxyEngine) Status() bool {
-	aep := getActiveEndpoints(p.localGateway, v1beta1.Proxy)
-	if aep == nil {
-		aep = getActiveEndpoints(findCentreGateway(p.client), v1beta1.Proxy)
+	gw := p.localGateway
+	if gw == nil {
+		gw = findCentreGateway(p.client)
 	}
-	if aep != nil && aep.Config != nil {
-		enable, err := strconv.ParseBool(aep.Config[utils.RavenEnableProxy])
-		if err == nil {
-			return enable
-		}
+	if gw == nil {
+		return false
 	}
-	return false
+	return gw.Spec.ProxyConfig.Replicas > 0
 }
 
 func (p *ProxyEngine) Handler() error {
